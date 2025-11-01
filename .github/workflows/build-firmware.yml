@@ -1,0 +1,86 @@
+name: Build ESP32 Firmware
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Detect changed boards
+    runs-on: ubuntu-latest
+    outputs:
+      variants: ${{ steps.select.outputs.variants }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - id: list
+        run: |
+          echo "all=$(python scripts/release.py --list-boards --json)" >> $GITHUB_OUTPUT
+
+      - name: Format boards json
+        id: fmt
+        run: |
+          echo '${{ steps.list.outputs.all }}' | jq -c '[.[] | {board: ., name: .}]' > boards.json
+          echo "boards=$(cat boards.json)" >> $GITHUB_OUTPUT
+
+      - id: select
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "variants=${{ steps.fmt.outputs.boards }}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          CHANGED=$(git diff --name-only $BASE $HEAD)
+
+          BOARDS=$(jq -r '.[].board' <<< "${{ steps.fmt.outputs.boards }}")
+          MATCH=()
+
+          for b in $BOARDS; do
+            if echo "$CHANGED" | grep -q "main/boards/$b"; then
+              MATCH+=("$b")
+            fi
+          done
+
+          if [[ ${#MATCH[@]} -eq 0 ]]; then
+            echo "variants=[]" >> $GITHUB_OUTPUT
+          else
+            jq -n --argjson boards "$(printf '%s\n' "${MATCH[@]}" | jq -R -s 'split("\n")[:-1]')" \
+              '$boards | map({board: ., name: .})' > filtered.json
+            echo "variants=$(cat filtered.json)" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.variants != '[]' }}
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:release-v5.4
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare.outputs.variants) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build firmware
+        run: |
+          source $IDF_PATH/export.sh
+          python scripts/release.py ${{ matrix.board }} --name ${{ matrix.name }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware_${{ matrix.name }}_${{ github.sha }}
+          path: build/merged-binary.bin
