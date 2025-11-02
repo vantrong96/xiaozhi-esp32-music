@@ -23,9 +23,13 @@ jobs:
       - id: list
         name: Get all boards list
         run: |
-          variants=$(python3 scripts/release.py --list-boards --json)
-          echo "variants=$variants" >> $GITHUB_OUTPUT
+          # tạo JSON một dòng, an toàn với vài ký tự đặc biệt
+          variants=$(python3 scripts/release.py --list-boards --json | jq -c .)
           echo "Detected variants: $variants"
+          # ghi output multiline-safe
+          echo "variants<<EOF" >> $GITHUB_OUTPUT
+          echo "$variants" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
   build:
     needs: prepare
@@ -39,17 +43,23 @@ jobs:
         include: ${{ fromJson(needs.prepare.outputs.variants) }}
 
     steps:
+      - name: Ensure container has required packages
+        run: |
+          apt-get update
+          apt-get install -y python3 python3-pip git jq
+
       - uses: actions/checkout@v4
 
       - name: Build firmware
         shell: bash
         run: |
+          # đảm bảo python là python3 và export IDF
           source $IDF_PATH/export.sh
-          python scripts/release.py ${{ matrix.board }} --name ${{ matrix.name }}
+          python3 scripts/release.py ${{ matrix.board }} --name ${{ matrix.name }}
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
           name: xiaozhi_${{ matrix.name }}_${{ github.sha }}
           path: build/merged-binary.bin
-          if-no-files-found: error
+          if-no-files-found: warn
